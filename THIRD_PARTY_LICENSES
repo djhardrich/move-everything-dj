@@ -1,0 +1,86 @@
+THIRD PARTY LICENSES
+
+This project incorporates the following third-party components:
+
+--------------------------------------------------------------------------------
+1. Bungee
+--------------------------------------------------------------------------------
+Source: src/dsp/bungee/
+License: Mozilla Public License Version 2.0 (MPL 2.0)
+
+See src/dsp/bungee/LICENSE for the full license text.
+
+--------------------------------------------------------------------------------
+2. Fraunhofer FDK AAC Codec Library for Android
+--------------------------------------------------------------------------------
+Source: src/dsp/fdk-aac/
+License: Software License for The Fraunhofer FDK AAC Codec Library for Android
+
+© Copyright 1995 - 2018 Fraunhofer-Gesellschaft zur Förderung der angewandten 
+Forschung e.V. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, 
+are permitted without payment of copyright license fees provided that conditions 
+in src/dsp/fdk-aac/NOTICE are satisfied.
+
+--------------------------------------------------------------------------------
+3. libxmp-lite (Extended Module Player)
+--------------------------------------------------------------------------------
+Source: src/dsp/libxmp/
+License: MIT License
+
+Copyright (C) 1996-2024 Claudio Matsuoka and Hipolito Carraro Jr
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+--------------------------------------------------------------------------------
+4. minimp3
+--------------------------------------------------------------------------------
+Source: src/dsp/minimp3/
+License: CC0 1.0 Universal
+
+This work has been dedicated to the public domain by the authors. 
+See src/dsp/minimp3/LICENSE for details.
+
+--------------------------------------------------------------------------------
+5. dr_flac
+--------------------------------------------------------------------------------
+Source: src/dsp/dr_flac.h
+License: Public Domain or MIT-0 (MIT No Attribution)
+
+Copyright (c) 2016-2026 David Reid
+
+--------------------------------------------------------------------------------
+6. PFFFT (Pretty Fast FFT)
+--------------------------------------------------------------------------------
+Source: src/dsp/bungee/submodules/pffft/
+License: BSD-style (FFTPACK license)
+
+Copyright (c) 2013 Julien Pommier ( pommier@modartt.com )
+Based on original fortran 77 code from FFTPACKv4 from NETLIB, 
+authored by Dr Paul Swarztrauber of NCAR, in 1985.
+
+--------------------------------------------------------------------------------
+7. Eigen
+--------------------------------------------------------------------------------
+Source: src/dsp/bungee/submodules/eigen/
+License: Mozilla Public License Version 2.0 (MPL 2.0)
+
+Most of Eigen is under MPL 2.0. Some parts are under other licenses 
+(BSD, Apache, etc.). See src/dsp/bungee/submodules/eigen/ for details.
+
+--------------------------------------------------------------------------------
+8. cxxopts
+--------------------------------------------------------------------------------
+Source: src/dsp/bungee/submodules/cxxopts/
+License: MIT License
+
+Copyright (c) 2014 Jarryd Beck

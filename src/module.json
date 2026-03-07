@@ -1,0 +1,19 @@
+{
+    "id": "dj",
+    "name": "DJ Deck",
+    "version": "0.1.0",
+    "description": "CDJ/turntable-style 4-track stem player with Bungee timestretch/pitchshift",
+    "author": "DJ Hard Rich",
+    "ui": "ui.js",
+    "dsp": "dsp.so",
+    "api_version": 2,
+    "component_type": "tool",
+    "capabilities": {
+        "claims_master_knob": true
+    },
+    "tool_config": {
+        "interactive": true,
+        "command": null,
+        "input_extensions": [".wav", ".mp3", ".m4a", ".aac", ".flac", ".mod", ".xm", ".it", ".s3m"]
+    }
+}
