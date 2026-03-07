@@ -1,0 +1,54 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify version matches tag
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          MODULE_VERSION=$(python3 -c "import json; print(json.load(open('src/module.json'))['version'])")
+          if [ "$TAG_VERSION" != "$MODULE_VERSION" ]; then
+            echo "Tag version ($TAG_VERSION) != module.json version ($MODULE_VERSION)"
+            exit 1
+          fi
+          echo "Version verified: $MODULE_VERSION"
+
+      - name: Build module
+        run: ./scripts/build.sh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/dj-module.tar.gz
+          generate_release_notes: true
+
+      - name: Update release.json
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/v${TAG_VERSION}/dj-module.tar.gz"
+          python3 -c "
+          import json
+          data = {'version': '${TAG_VERSION}', 'download_url': '${DOWNLOAD_URL}'}
+          with open('release.json', 'w') as f:
+              json.dump(data, f, indent=4)
+          "
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout ${{ github.event.repository.default_branch }}
+          git add release.json
+          git diff --cached --quiet || git commit -m "Update release.json to v${TAG_VERSION}"
+          git push || true
