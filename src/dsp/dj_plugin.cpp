@@ -84,7 +84,7 @@ plugin_api_v2_t* move_plugin_init_v2(const host_api_v1_t *host);
 /* ------------------------------------------------------------------ */
 
 static const int    SAMPLE_RATE     = 44100;
-static const int    MAX_FRAMES      = SAMPLE_RATE * 300;
+static const int    MAX_FRAMES      = SAMPLE_RATE * 900;  /* 15 minutes */
 static const int    NUM_STEMS       = 4;
 static const int    NUM_CUES        = 8;
 static const int    NUM_DECKS       = 2;
@@ -226,7 +226,6 @@ static void deferred_free(void *p) {
         s_deferred_frees[idx] = p;
         s_deferred_free_count.store(idx + 1, std::memory_order_release);
     } else {
-        /* Fallback: free immediately (shouldn't happen in practice) */
         free(p);
     }
 }
@@ -238,6 +237,15 @@ static void flush_deferred_frees() {
         s_deferred_frees[i] = nullptr;
     }
     s_deferred_free_count.store(0, std::memory_order_release);
+}
+
+/* Free a track's audio buffer and reset fields */
+static void free_audio(track_t *trk) {
+    if (!trk->audio_data) return;
+    free(trk->audio_data);
+    trk->audio_data = nullptr;
+    trk->audio_frames = 0;
+    trk->duration_secs = 0;
 }
 
 static bool s_cue_dir_created = false;
@@ -384,7 +392,7 @@ static float *resample_to_target(float *buf, int src_frames, int src_rate, int *
     if (src_rate == SAMPLE_RATE || src_rate <= 0) { *out_frames = src_frames; return buf; }
     double ratio = (double)SAMPLE_RATE / (double)src_rate;
     int dst_frames = (int)(src_frames * ratio);
-    if (dst_frames <= 0 || dst_frames > MAX_FRAMES) { *out_frames = src_frames; return buf; }
+    if (dst_frames <= 0) { *out_frames = src_frames; return buf; }
     float *dst = (float *)calloc(dst_frames * 2, sizeof(float));
     if (!dst) { *out_frames = src_frames; return buf; }
     for (int i = 0; i < dst_frames; i++) {
@@ -415,7 +423,7 @@ static uint32_t read_u32(const uint8_t *p) {
 }
 
 static bool load_wav(track_t *trk, const char *path) {
-    if (trk->audio_data) { free(trk->audio_data); trk->audio_data = nullptr; trk->audio_frames = 0; trk->duration_secs = 0; }
+    free_audio(trk);
     FILE *fp = fopen(path, "rb");
     if (!fp) { host_log("[dj] cannot open %s", path); return false; }
     fseek(fp, 0, SEEK_END); long file_size = ftell(fp); fseek(fp, 0, SEEK_SET);
@@ -454,7 +462,10 @@ static bool load_wav(track_t *trk, const char *path) {
     int bytes_per_sample = bits_per_sample / 8;
     int block_align = bytes_per_sample * num_channels;
     int total_frames = (int)(data_size / block_align);
-    if (total_frames > MAX_FRAMES) total_frames = MAX_FRAMES;
+    /* Scale max by sample rate so resampling to SAMPLE_RATE yields up to MAX_FRAMES */
+    int max_src_frames = (sample_rate <= SAMPLE_RATE) ? MAX_FRAMES
+        : (int)((double)MAX_FRAMES * (double)sample_rate / (double)SAMPLE_RATE);
+    if (total_frames > max_src_frames) total_frames = max_src_frames;
     if (total_frames <= 0) { free(raw); return false; }
 
     float *buf = (float *)calloc(total_frames * 2, sizeof(float));
@@ -501,8 +512,7 @@ static bool load_mod(deck_t *dk, const char *path) {
     int stems = (mod_channels < NUM_STEMS) ? mod_channels : NUM_STEMS;
 
     for (int t = 0; t < NUM_STEMS; t++) {
-        if (dk->tracks[t].audio_data) { free(dk->tracks[t].audio_data); dk->tracks[t].audio_data = nullptr; }
-        dk->tracks[t].audio_frames = 0; dk->tracks[t].duration_secs = 0;
+        free_audio(&dk->tracks[t]);
         dk->tracks[t].file_name[0] = '\0'; dk->tracks[t].file_path[0] = '\0';
         dk->tracks[t].muted = 0; dk->tracks[t].volume = 1.0f;
     }
@@ -513,7 +523,8 @@ static bool load_mod(deck_t *dk, const char *path) {
         for (int i = 0; i < mod_channels; i++) xmp_channel_mute(ctx, i, (i == ch) ? 0 : 1);
         xmp_restart_module(ctx);
 
-        float *buf = (float *)calloc(MAX_FRAMES * 2, sizeof(float));
+        int buf_capacity = SAMPLE_RATE * 60; /* start 60s, grow as needed */
+        float *buf = (float *)calloc(buf_capacity * 2, sizeof(float));
         if (!buf) { xmp_end_player(ctx); continue; }
         int total_frames = 0;
         int16_t render_buf[4096];
@@ -522,6 +533,13 @@ static bool load_mod(deck_t *dk, const char *path) {
             if (ret < 0) break;
             int chunk_frames = (int)(sizeof(render_buf) / 4);
             int to_copy = std::min(chunk_frames, MAX_FRAMES - total_frames);
+            if (total_frames + to_copy > buf_capacity) {
+                int new_cap = std::max(buf_capacity * 2, total_frames + to_copy);
+                if (new_cap > MAX_FRAMES) new_cap = MAX_FRAMES;
+                float *newbuf = (float *)realloc(buf, new_cap * 2 * sizeof(float));
+                if (!newbuf) break;
+                buf = newbuf; buf_capacity = new_cap;
+            }
             for (int i = 0; i < to_copy; i++) {
                 buf[(total_frames+i)*2+0] = render_buf[i*2+0] / 32768.0f;
                 buf[(total_frames+i)*2+1] = render_buf[i*2+1] / 32768.0f;
@@ -532,7 +550,8 @@ static bool load_mod(deck_t *dk, const char *path) {
 
         if (total_frames > 0) {
             float *trimmed = (float *)realloc(buf, total_frames * 2 * sizeof(float));
-            dk->tracks[ch].audio_data = trimmed ? trimmed : buf;
+            buf = trimmed ? trimmed : buf;
+            dk->tracks[ch].audio_data = buf;
             dk->tracks[ch].audio_frames = total_frames;
             dk->tracks[ch].duration_secs = (float)total_frames / (float)SAMPLE_RATE;
             snprintf(dk->tracks[ch].file_name, sizeof(dk->tracks[ch].file_name), "%s Ch%d", fname, ch+1);
@@ -557,13 +576,15 @@ static bool load_mod(deck_t *dk, const char *path) {
 #ifdef HAS_MP3
 
 static bool load_mp3(track_t *trk, const char *path) {
-    if (trk->audio_data) { free(trk->audio_data); trk->audio_data = nullptr; trk->audio_frames = 0; trk->duration_secs = 0; }
+    free_audio(trk);
     mp3dec_t mp3d; mp3dec_file_info_t info; memset(&info, 0, sizeof(info));
     if (mp3dec_load(&mp3d, path, &info, NULL, NULL) != 0) { host_log("[dj] mp3 decode failed: %s", path); return false; }
     if (info.samples == 0 || !info.buffer) { if (info.buffer) free(info.buffer); return false; }
     int channels = info.channels;
     int total_frames = (int)(info.samples / channels);
-    if (total_frames > MAX_FRAMES) total_frames = MAX_FRAMES;
+    int max_src_frames = (info.hz <= SAMPLE_RATE) ? MAX_FRAMES
+        : (int)((double)MAX_FRAMES * (double)info.hz / (double)SAMPLE_RATE);
+    if (total_frames > max_src_frames) total_frames = max_src_frames;
     float *buf = (float *)calloc(total_frames * 2, sizeof(float));
     if (!buf) { free(info.buffer); return false; }
     for (int i = 0; i < total_frames; i++) {
@@ -681,7 +702,7 @@ static void mp4_parse_atoms(const uint8_t *data, size_t len, size_t base_offset,
 }
 
 static bool load_m4a(track_t *trk, const char *path) {
-    if (trk->audio_data) { free(trk->audio_data); trk->audio_data=nullptr; trk->audio_frames=0; trk->duration_secs=0; }
+    free_audio(trk);
     FILE *fp = fopen(path, "rb"); if (!fp) return false;
     fseek(fp,0,SEEK_END); long file_size=ftell(fp); fseek(fp,0,SEEK_SET);
     if (file_size<32||file_size>500*1024*1024) { fclose(fp); return false; }
@@ -713,7 +734,8 @@ static bool load_m4a(track_t *trk, const char *path) {
     UCHAR *asc_buf=st.asc; UINT asc_size=(UINT)st.asc_len;
     if (aacDecoder_ConfigRaw(aac,&asc_buf,&asc_size)!=AAC_DEC_OK) { aacDecoder_Close(aac); free(sample_offsets); if(st.sample_sizes)free(st.sample_sizes); if(st.chunk_offsets)free(st.chunk_offsets); if(st.stsc_entries)free(st.stsc_entries); free(raw); return false; }
 
-    float *buf=(float*)calloc(MAX_FRAMES*2,sizeof(float));
+    int buf_capacity=SAMPLE_RATE*60; /* start with 60s, grow as needed */
+    float *buf=(float*)calloc(buf_capacity*2,sizeof(float));
     if (!buf) { aacDecoder_Close(aac); free(sample_offsets); if(st.sample_sizes)free(st.sample_sizes); if(st.chunk_offsets)free(st.chunk_offsets); if(st.stsc_entries)free(st.stsc_entries); free(raw); return false; }
     int total_frames=0, out_sample_rate=SAMPLE_RATE, out_channels=2;
     INT_PCM pcm_buf[2048*2];
@@ -728,6 +750,14 @@ static bool load_m4a(track_t *trk, const char *path) {
         if (!info||info->numChannels<1) continue;
         if (i==0) { out_sample_rate=info->sampleRate; out_channels=info->numChannels; }
         int frame_samples=info->frameSize, to_copy=std::min(frame_samples,MAX_FRAMES-total_frames);
+        /* Grow buffer if needed */
+        if (total_frames+to_copy>buf_capacity) {
+            int new_cap=std::max(buf_capacity*2, total_frames+to_copy);
+            if (new_cap>MAX_FRAMES) new_cap=MAX_FRAMES;
+            float *newbuf=(float*)realloc(buf,new_cap*2*sizeof(float));
+            if (!newbuf) break; /* out of memory, use what we have */
+            buf=newbuf; buf_capacity=new_cap;
+        }
         for (int j=0;j<to_copy;j++) {
             float L=pcm_buf[j*out_channels]/32768.0f;
             float R=(out_channels>1)?pcm_buf[j*out_channels+1]/32768.0f:L;
@@ -761,7 +791,7 @@ static bool load_m4a(track_t *trk, const char *path) {
 #ifdef HAS_FLAC
 
 static bool load_flac(track_t *trk, const char *path) {
-    if (trk->audio_data) { free(trk->audio_data); trk->audio_data=nullptr; trk->audio_frames=0; trk->duration_secs=0; }
+    free_audio(trk);
     FILE *fp=fopen(path,"rb"); if(!fp) return false;
     fseek(fp,0,SEEK_END); long file_size=ftell(fp); fseek(fp,0,SEEK_SET);
     if (file_size<8||file_size>500*1024*1024) { fclose(fp); return false; }
@@ -773,7 +803,10 @@ static bool load_flac(track_t *trk, const char *path) {
     drflac_int16 *samples=drflac_open_memory_and_read_pcm_frames_s16(raw,(size_t)file_size,&channels,&sample_rate,&total_pcm,NULL);
     free(raw);
     if (!samples||total_pcm==0) { if(samples) drflac_free(samples,NULL); return false; }
-    int total_frames=(int)total_pcm; if(total_frames>MAX_FRAMES) total_frames=MAX_FRAMES;
+    int total_frames=(int)total_pcm;
+    int max_src_frames=(sample_rate<=SAMPLE_RATE)?MAX_FRAMES
+        :(int)((double)MAX_FRAMES*(double)sample_rate/(double)SAMPLE_RATE);
+    if(total_frames>max_src_frames) total_frames=max_src_frames;
     float *buf=(float*)calloc(total_frames*2,sizeof(float));
     if (!buf) { drflac_free(samples,NULL); return false; }
     for (int i=0;i<total_frames;i++) {
@@ -1417,7 +1450,7 @@ static void *bg_load_thread(void *arg) {
         dk->load_state.store(2, std::memory_order_release); /* ready for swap */
     } else {
         for (int t = 0; t < NUM_STEMS; t++)
-            if (dk->new_tracks[t].audio_data) { free(dk->new_tracks[t].audio_data); dk->new_tracks[t].audio_data = nullptr; }
+            free_audio(&dk->new_tracks[t]);
         dk->load_state.store(0, std::memory_order_release);
     }
 
@@ -1645,7 +1678,7 @@ static void destroy_deck(deck_t *dk) {
     if (dk->grain_input) free(dk->grain_input);
     if (dk->out_buf) free(dk->out_buf);
     for (int t = 0; t < NUM_STEMS; t++)
-        if (dk->tracks[t].audio_data) free(dk->tracks[t].audio_data);
+        free_audio(&dk->tracks[t]);
 }
 
 /* ------------------------------------------------------------------ */

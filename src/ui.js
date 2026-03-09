@@ -17,7 +17,7 @@ import * as os from 'os';
 
 import { setButtonLED, setLED, clearAllLEDs, decodeDelta,
          shouldFilterMessage } from '/data/UserData/move-anything/shared/input_filter.mjs';
-import { MoveBack, MoveMenu, MovePlay, MoveShift, MoveRec,
+import { MoveBack, MovePlay, MoveShift, MoveRec,
          MoveMainKnob, MoveMainButton, MoveMaster,
          MoveRow1, MoveRow2, MoveRow3, MoveRow4,
          MoveKnob1, MoveKnob2, MoveKnob3, MoveKnob4,
@@ -127,6 +127,7 @@ let DOUBLE_TAP_MS = 2100;
 /* Slip mode button CCs */
 let MoveCapture = 52;
 let MoveSample = 118;
+let MoveCopy = 60;
 
 /* All knob touch notes */
 let KNOB_TOUCHES = [0, 1, 2, 3, 4, 5, 6, 7]; /* MoveKnob1Touch..MoveKnob8Touch */
@@ -235,6 +236,14 @@ let paramQueue = [];
 /* ============================================================================
  * Helpers
  * ============================================================================ */
+
+function announce(text) {
+    if (typeof host_send_screenreader === "function") {
+        host_send_screenreader(text);
+    } else if (typeof host_announce_screenreader === "function") {
+        host_announce_screenreader(text);
+    }
+}
 
 function clamp(v, lo, hi) {
     return v < lo ? lo : (v > hi ? hi : v);
@@ -675,6 +684,7 @@ function openBrowser(targetDeck) {
     browserTargetStem = 0;
     refreshBrowser();
     currentView = VIEW_BROWSER;
+    announce("File browser, Deck " + (targetDeck === 0 ? "A" : "B"));
 }
 
 function refreshBrowser() {
@@ -723,6 +733,8 @@ function browserNavigate(delta) {
     if (browserItems.length === 0) return;
     browserSelectedIdx = clamp(browserSelectedIdx + (delta > 0 ? 1 : -1),
                                0, browserItems.length - 1);
+    let sel = browserItems[browserSelectedIdx];
+    if (sel) announce(sel.label);
 }
 
 function browserSelect() {
@@ -741,9 +753,11 @@ function browserSelect() {
         sendParamNow(prefix + "vol", "100");
         if (hasExtension(sel.label, MOD_EXTS)) {
             queueParam(prefix + "load_file", sel.path);
+            announce("Loading " + sel.label + " to Deck " + deckLabel);
             showOverlay("Deck " + deckLabel + ": MOD", sel.label);
         } else {
             queueParam(prefix + "stem_path_" + browserTargetStem, sel.path);
+            announce("Loading " + sel.label + " to Deck " + deckLabel);
             showOverlay("Deck " + deckLabel + " S" + (browserTargetStem + 1), sel.label);
         }
         currentView = VIEW_DECK;
@@ -789,10 +803,12 @@ function playlistNavigate(delta) {
         if (playlistNames.length === 0) return;
         playlistSelectedIdx = clamp(playlistSelectedIdx + (delta > 0 ? 1 : -1),
                                     0, playlistNames.length - 1);
+        announce(playlistNames[playlistSelectedIdx]);
     } else {
         if (playlistTrackPaths.length === 0) return;
         playlistSelectedIdx = clamp(playlistSelectedIdx + (delta > 0 ? 1 : -1),
                                     0, playlistTrackPaths.length - 1);
+        announce(pathBasename(playlistTrackPaths[playlistSelectedIdx]));
     }
 }
 
@@ -810,6 +826,7 @@ function playlistSelect(targetDeck) {
         }
         playlistSelectedIdx = 0;
         playlistBrowseMode = 1;
+        announce("Playlist " + playlistNames[playlistActiveIdx]);
     } else {
         /* Load selected track to target deck */
         if (playlistTrackPaths.length === 0) return;
@@ -823,6 +840,7 @@ function playlistSelect(targetDeck) {
         } else {
             queueParam(prefix + "stem_path_0", path);
         }
+        announce("Loading " + pathBasename(path) + " to Deck " + deckLabel);
         showOverlay("Deck " + deckLabel, pathBasename(path));
         currentView = VIEW_DECK;
         playlistPageActive = false;
@@ -835,9 +853,11 @@ function playlistBack() {
         playlistSelectedIdx = playlistActiveIdx;
         playlistActiveIdx = -1;
         playlistTrackPaths = [];
+        announce("Playlists");
     } else {
         currentView = VIEW_DECK;
         playlistPageActive = false;
+        announce("Deck view");
     }
 }
 
@@ -1031,7 +1051,7 @@ function updateControlLEDs() {
     setButtonLED(MovePlay, deck[0].playing ? WhiteLedBright : Black);
     setButtonLED(MoveRec, deck[1].playing ? WhiteLedBright : Black);
     setButtonLED(MoveBack, WhiteLedBright);
-    setButtonLED(MoveMenu, WhiteLedDim);
+    setButtonLED(MoveCopy, WhiteLedDim);
 }
 
 /* ============================================================================
@@ -1524,6 +1544,7 @@ function handleCC(cc, val) {
             } else {
                 backConfirmPending = true;
                 backConfirmTime = now;
+                announce("Press Back again to exit");
                 showOverlay("Press Back again", "to exit DJ module", BACK_CONFIRM_MS);
             }
         }
@@ -1531,10 +1552,11 @@ function handleCC(cc, val) {
         return;
     }
 
-    /* Menu button: cycle display rotation */
-    if (cc === MoveMenu && val > 63) {
+    /* Copy button (above Shift): cycle display rotation */
+    if (cc === MoveCopy && val > 63) {
         displayRotation = (displayRotation + 1) % 4;
         let labels = ["Normal", "90 CW", "180", "270 CW"];
+        announce("Display " + labels[displayRotation]);
         showOverlay("Display", labels[displayRotation]);
         needsRedraw = true;
         return;
@@ -1547,6 +1569,7 @@ function handleCC(cc, val) {
         if (v) deck[0].playing = (v === "1");
         deck[0].playing = !deck[0].playing;
         sendParamNow("a_playing", deck[0].playing ? "1" : "0");
+        announce("Deck A " + (deck[0].playing ? "playing" : "stopped"));
         updateControlLEDs();
         needsRedraw = true;
         return;
@@ -1558,6 +1581,7 @@ function handleCC(cc, val) {
         if (v) deck[1].playing = (v === "1");
         deck[1].playing = !deck[1].playing;
         sendParamNow("b_playing", deck[1].playing ? "1" : "0");
+        announce("Deck B " + (deck[1].playing ? "playing" : "stopped"));
         updateControlLEDs();
         needsRedraw = true;
         return;
@@ -1577,6 +1601,8 @@ function handleCC(cc, val) {
             let newPage = clamp(knobPage + (delta > 0 ? 1 : -1), KNOB_PAGE_MAIN, KNOB_PAGE_STEMS);
             if (newPage !== knobPage) {
                 knobPage = newPage;
+                let kpNames = ["Main", "FX", "Stems"];
+                announce(kpNames[knobPage] + " knob page");
                 updatePageLEDs();
                 needsRedraw = true;
             }
@@ -1624,12 +1650,14 @@ function handleCC(cc, val) {
             } else if (shiftHeld) {
                 /* Shift + track: switch active deck */
                 activeDeck = (activeDeck === 0) ? 1 : 0;
+                announce("Deck " + (activeDeck === 0 ? "A" : "B"));
                 updateAllLEDs();
             } else {
                 /* Toggle mute on active deck */
                 let dk = deck[activeDeck];
                 dk.stemMutes[t] = dk.stemMutes[t] ? 0 : 1;
                 sendParamNow(dp(activeDeck, "stem_mute_" + t), String(dk.stemMutes[t]));
+                announce("Stem " + (t + 1) + (dk.stemMutes[t] ? " muted" : " unmuted"));
                 updateTrackLEDs();
             }
             needsRedraw = true;
@@ -1709,6 +1737,7 @@ function handleKnobMain(cc, val) {
         let newDeck = delta < 0 ? 0 : 1;
         if (activeDeck !== newDeck) {
             activeDeck = newDeck;
+            announce("Deck " + (activeDeck === 0 ? "A" : "B"));
             updateAllLEDs();
             needsRedraw = true;
         }
@@ -1869,6 +1898,7 @@ function handleKnobCueEdit(cc, val) {
         let newDeck = delta < 0 ? 0 : 1;
         if (activeDeck !== newDeck) {
             activeDeck = newDeck;
+            announce("Deck " + (activeDeck === 0 ? "A" : "B"));
             updateAllLEDs();
             needsRedraw = true;
         }
@@ -1922,6 +1952,8 @@ function handleNoteOn(note, vel) {
             }
         }
         currentPage = note - STEP_BASE;
+        let padPageNames = ["Hot Cue", "Stutter", "Loop", "Cue Edit"];
+        announce(padPageNames[currentPage] + " page");
         updatePageLEDs();
         updatePadLEDs();
         needsRedraw = true;
@@ -1931,18 +1963,21 @@ function handleNoteOn(note, vel) {
     /* Step 5-7: knob page shortcuts */
     if (note === STEP_BASE + 4) {
         knobPage = KNOB_PAGE_MAIN;
+        announce("Main knob page");
         updatePageLEDs();
         needsRedraw = true;
         return;
     }
     if (note === STEP_BASE + 5) {
         knobPage = KNOB_PAGE_FX;
+        announce("FX knob page");
         updatePageLEDs();
         needsRedraw = true;
         return;
     }
     if (note === STEP_BASE + 6) {
         knobPage = KNOB_PAGE_STEMS;
+        announce("Stems knob page");
         updatePageLEDs();
         needsRedraw = true;
         return;
@@ -1951,6 +1986,7 @@ function handleNoteOn(note, vel) {
     /* Step 8: toggle active deck */
     if (note === STEP_BASE + 7) {
         activeDeck = (activeDeck === 0) ? 1 : 0;
+        announce("Deck " + (activeDeck === 0 ? "A" : "B"));
         updateAllLEDs();
         needsRedraw = true;
         return;
@@ -1960,6 +1996,7 @@ function handleNoteOn(note, vel) {
     if (note === STEP_BASE + 8) {
         deck[0].slipMode = !deck[0].slipMode;
         sendParamNow("a_slip_mode", deck[0].slipMode ? "1" : "0");
+        announce("Deck A Slip " + (deck[0].slipMode ? "on" : "off"));
         showOverlay("Deck A Slip", deck[0].slipMode ? "ON" : "OFF");
         updatePageLEDs();
         needsRedraw = true;
@@ -1970,6 +2007,7 @@ function handleNoteOn(note, vel) {
     if (note === STEP_BASE + 9) {
         deck[1].slipMode = !deck[1].slipMode;
         sendParamNow("b_slip_mode", deck[1].slipMode ? "1" : "0");
+        announce("Deck B Slip " + (deck[1].slipMode ? "on" : "off"));
         showOverlay("Deck B Slip", deck[1].slipMode ? "ON" : "OFF");
         updatePageLEDs();
         needsRedraw = true;
@@ -1982,6 +2020,7 @@ function handleNoteOn(note, vel) {
     if (note === STEP_BASE + 11) {
         deck[0].syncMode = !deck[0].syncMode;
         if (deck[0].syncMode) performSync(0);
+        announce("Deck A Sync " + (deck[0].syncMode ? "on" : "off"));
         showOverlay("Deck A Sync", deck[0].syncMode ? "ON" : "OFF");
         updatePageLEDs();
         needsRedraw = true;
@@ -1992,6 +2031,7 @@ function handleNoteOn(note, vel) {
     if (note === STEP_BASE + 12) {
         deck[1].syncMode = !deck[1].syncMode;
         if (deck[1].syncMode) performSync(1);
+        announce("Deck B Sync " + (deck[1].syncMode ? "on" : "off"));
         showOverlay("Deck B Sync", deck[1].syncMode ? "ON" : "OFF");
         updatePageLEDs();
         needsRedraw = true;
@@ -2003,8 +2043,10 @@ function handleNoteOn(note, vel) {
         if (currentView === VIEW_PLAYLIST) {
             currentView = VIEW_DECK;
             playlistPageActive = false;
+            announce("Deck view");
         } else {
             openPlaylistView();
+            announce("Playlists");
         }
         updatePageLEDs();
         needsRedraw = true;
@@ -2056,11 +2098,13 @@ function handlePadPress(deckIdx, padIdx) {
                 /* Re-press active loop: toggle off */
                 dk.loopActive = false;
                 sendParamNow(dp(deckIdx, "hot_loop"), "-1");
+                announce("Loop off");
             } else {
                 /* Select new loop size and enable */
                 dk.loopSizeIdx = padIdx;
                 dk.loopActive = true;
                 sendParamNow(dp(deckIdx, "hot_loop"), String(padIdx));
+                announce("Loop " + LOOP_LABELS[padIdx]);
             }
             updatePadLEDs();
             needsRedraw = true;
@@ -2076,6 +2120,7 @@ function handlePadPress(deckIdx, padIdx) {
             dk.hotLoopHeld = hlIdx;
             dk.loopSizeIdx = HOT_LOOP_IDX[hlIdx];
             dk.loopActive = true;
+            announce("Roll " + HOT_LOOP_LABELS[hlIdx]);
             sendParamNow(dp(deckIdx, "hot_loop"), String(HOT_LOOP_IDX[hlIdx]));
             updatePadLEDs();
             needsRedraw = true;
@@ -2098,6 +2143,7 @@ function handlePadPress(deckIdx, padIdx) {
             if (stuttIdx < NUM_STUTTER) {
                 dk.stutterPadHeld = stuttIdx;
                 dk.stutterActive = true;
+                announce("Stutter " + STUTTER_LABELS[stuttIdx]);
                 /* Use stutter_go which atomically sets size AND activates.
                  * Two back-to-back sendParamNow calls get coalesced by the
                  * framework (only one param delivered per tick). */
@@ -2115,6 +2161,7 @@ function handlePadPress(deckIdx, padIdx) {
             sendParamNow(dp(deckIdx, "clear_cue"), String(padIdx));
             dk.cuePositions[padIdx] = -1;
             if (dk.editCueIdx === padIdx) dk.editCueIdx = -1;
+            announce("Cue " + (padIdx + 1) + " cleared");
         } else {
             /* Save previous cue before switching */
             if (dk.editCueIdx >= 0 && dk.editCueIdx !== padIdx) {
@@ -2124,6 +2171,9 @@ function handlePadPress(deckIdx, padIdx) {
             if (dk.cuePositions[padIdx] < 0) {
                 sendParamNow(dp(deckIdx, "set_cue"), String(padIdx));
                 dk.cuePositions[padIdx] = dk.playPos;
+                announce("Cue " + (padIdx + 1) + " created, editing");
+            } else {
+                announce("Editing cue " + (padIdx + 1));
             }
             dk.editCueIdx = padIdx;
             if (!dk.waveform) syncWaveform(deckIdx);
@@ -2137,6 +2187,7 @@ function handlePadPress(deckIdx, padIdx) {
         if (shiftHeld && dk.cuePositions[padIdx] >= 0) {
             sendParamNow(dp(deckIdx, "clear_cue"), String(padIdx));
             dk.cuePositions[padIdx] = -1;
+            announce("Cue " + (padIdx + 1) + " cleared");
         } else if (dk.cuePositions[padIdx] >= 0) {
             /* Disable loop/hot-loop if active before jumping to cue */
             if (dk.loopActive || dk.hotLoopHeld >= 0) {
@@ -2145,9 +2196,11 @@ function handlePadPress(deckIdx, padIdx) {
                 sendParamNow(dp(deckIdx, "hot_loop"), "-1");
             }
             sendParamNow(dp(deckIdx, "jump_cue"), String(padIdx));
+            announce("Cue " + (padIdx + 1));
         } else {
             sendParamNow(dp(deckIdx, "set_cue"), String(padIdx));
             dk.cuePositions[padIdx] = dk.playPos;
+            announce("Cue " + (padIdx + 1) + " set");
         }
         updatePadLEDs();
         needsRedraw = true;
@@ -2161,6 +2214,7 @@ function handlePadPress(deckIdx, padIdx) {
                 sendParamNow(dp(deckIdx, "hot_loop"), "-1");
             }
             sendParamNow(dp(deckIdx, "jump_cue"), String(padIdx));
+            announce("Cue " + (padIdx + 1));
         }
         updatePadLEDs();
         needsRedraw = true;
@@ -2190,21 +2244,27 @@ function onMidiMessage(msg) {
             if (d1 === MoveKnob1Touch && currentPage === PAGE_STUTTER) {
                 dk.stutterPitch = 0;
                 sendParamNow(dp(activeDeck, "stutter_pitch"), "0");
+                announce("Stutter pitch reset");
             } else if (d1 === MoveKnob2Touch && currentPage === PAGE_STUTTER) {
                 dk.stutterFilter = 50;
                 sendParamNow(dp(activeDeck, "stutter_filter"), "50");
+                announce("Stutter filter reset");
             } else if (d1 === MoveKnob1Touch) {
                 dk.pitchSemitones = 0;
                 sendParamNow(dp(activeDeck, "pitch_semitones"), "0");
+                announce("Pitch reset");
             } else if (d1 === MoveKnob2Touch) {
                 dk.speedPct = 100;
                 sendParamNow(dp(activeDeck, "speed_pct"), "100");
+                announce("Speed reset");
             } else if (d1 === MoveKnob7Touch) {
                 deck[0].vinylSpeed = 100;
                 sendParamNow("a_vinyl_speed", "100");
+                announce("Deck A vinyl speed reset");
             } else if (d1 === MoveKnob8Touch) {
                 deck[1].vinylSpeed = 100;
                 sendParamNow("b_vinyl_speed", "100");
+                announce("Deck B vinyl speed reset");
             }
             knobLastTouch[d1] = 0;
             needsRedraw = true;
@@ -2212,7 +2272,10 @@ function onMidiMessage(msg) {
             /* Single tap: show knob function overlay */
             knobLastTouch[d1] = now;
             let label = getKnobLabel(d1);
-            if (label) showOverlay("Knob " + (d1 + 1), label);
+            if (label) {
+                announce(label);
+                showOverlay("Knob " + (d1 + 1), label);
+            }
             needsRedraw = true;
         }
         return;
@@ -2261,6 +2324,8 @@ globalThis.init = function() {
     syncStemInfo(1);
     syncCuePositions(0);
     syncCuePositions(1);
+
+    announce("DJ Deck loaded");
 };
 
 globalThis.tick = function() {
