@@ -1,0 +1,12 @@
+[submodule "src/dsp/bungee"]
+	path = src/dsp/bungee
+	url = https://github.com/bungee-audio-stretch/bungee.git
+[submodule "src/dsp/libxmp"]
+	path = src/dsp/libxmp
+	url = https://github.com/libxmp/libxmp.git
+[submodule "src/dsp/minimp3"]
+	path = src/dsp/minimp3
+	url = https://github.com/lieff/minimp3.git
+[submodule "src/dsp/fdk-aac"]
+	path = src/dsp/fdk-aac
+	url = https://github.com/mstorsjo/fdk-aac.git

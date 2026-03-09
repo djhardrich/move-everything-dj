@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DJ Library Manager</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Toolbar -->
+        <div id="toolbar">
+            <button class="btn" id="btn-sidebar-toggle" title="Playlists">&#9776;</button>
+            <input type="text" id="search-input" placeholder="Search tracks...">
+            <button class="btn" id="btn-import-files">Import Files</button>
+            <button class="btn" id="btn-import-cue">Import .cue</button>
+            <button class="btn" id="btn-import-djlib">Import .djlib</button>
+            <button class="btn" id="btn-export-djlib">Export .djlib</button>
+            <button class="btn" id="btn-export-cue">Export .cue (zip)</button>
+            <button class="btn" id="btn-export-playlists">Export Playlists</button>
+            <button class="btn btn-accent" id="btn-export-bundle">Export Bundle</button>
+            <button class="btn" id="btn-settings" title="Settings">&#9881;</button>
+        </div>
+
+        <!-- Sidebar -->
+        <div id="sidebar">
+            <h3>Playlists</h3>
+            <div id="playlist-list"></div>
+            <div class="playlist-actions">
+                <button class="btn" id="btn-new-playlist" style="width:100%">+ New Playlist</button>
+            </div>
+        </div>
+
+        <!-- Main content -->
+        <div id="main">
+            <table id="track-table">
+                <thead>
+                    <tr>
+                        <th data-field="index">#</th>
+                        <th data-field="title">Title</th>
+                        <th data-field="artist">Artist</th>
+                        <th data-field="bpm">BPM</th>
+                        <th data-field="key">Key</th>
+                        <th data-field="duration">Duration</th>
+                    </tr>
+                </thead>
+                <tbody id="track-tbody"></tbody>
+            </table>
+            <div id="empty-state" class="empty-state" style="display:none">
+                <div class="drop-hint">Drop audio files here to import</div>
+                <p>or use the Import button above</p>
+            </div>
+        </div>
+
+        <!-- Detail panel -->
+        <div id="detail" class="hidden">
+            <div id="detail-inner">
+                <div id="waveform-panel">
+                    <canvas id="waveform-canvas"></canvas>
+                    <div id="waveform-controls">
+                        <button class="btn" id="btn-play">&#9654; Play</button>
+                        <button class="btn" id="btn-stop">&#9632; Stop</button>
+                        <span id="playback-time">00:00 / 00:00</span>
+                        <span style="flex:1"></span>
+                        <button class="btn" id="btn-zoom-in">Zoom +</button>
+                        <button class="btn" id="btn-zoom-out">Zoom -</button>
+                        <button class="btn" id="btn-zoom-reset">Fit</button>
+                    </div>
+                    <div id="cue-list"></div>
+                </div>
+                <div id="metadata-panel">
+                    <label>Title</label>
+                    <input type="text" id="meta-title">
+                    <label>Artist</label>
+                    <input type="text" id="meta-artist">
+                    <label>BPM</label>
+                    <input type="number" id="meta-bpm" step="0.1">
+                    <label>Key</label>
+                    <input type="text" id="meta-key">
+                    <label>Comment</label>
+                    <textarea id="meta-comment" rows="2"></textarea>
+                    <label>Beat Grid BPM</label>
+                    <input type="number" id="meta-beatgrid-bpm" step="0.01" placeholder="Exact BPM">
+                    <label>Downbeat Position (seconds)</label>
+                    <input type="number" id="meta-beatgrid-downbeat" step="0.001" placeholder="First downbeat">
+                    <label>File Path (Move)</label>
+                    <input type="text" id="meta-filepath" readonly>
+                    <label>Cue File Hash</label>
+                    <input type="text" id="meta-hash" readonly>
+                    <div style="margin-top:10px">
+                        <button class="btn btn-danger" id="btn-delete-track">Delete Track</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Drop overlay -->
+    <div id="drop-overlay">Drop audio files to import</div>
+
+    <!-- Settings modal -->
+    <div class="modal-overlay" id="settings-modal">
+        <div class="modal">
+            <h3>Settings</h3>
+            <div class="field">
+                <label>Move Library Root Path</label>
+                <input type="text" id="setting-lib-root">
+            </div>
+            <div class="modal-buttons">
+                <button class="btn" id="btn-settings-cancel">Cancel</button>
+                <button class="btn btn-accent" id="btn-settings-save">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hidden file inputs -->
+    <input type="file" id="file-input-audio" multiple accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg,.aif,.aiff" style="display:none">
+    <input type="file" id="file-input-cue" multiple accept=".cue" style="display:none">
+    <input type="file" id="file-input-djlib" accept=".djlib,.json" style="display:none">
+
+    <script type="module" src="js/app.js"></script>
+</body>
+</html>
