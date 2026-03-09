@@ -23,6 +23,9 @@
 #include <atomic>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 #include <bungee/Bungee.h>
 #include <submodules/pffft/pffft.h>
@@ -84,7 +87,7 @@ plugin_api_v2_t* move_plugin_init_v2(const host_api_v1_t *host);
 /* ------------------------------------------------------------------ */
 
 static const int    SAMPLE_RATE     = 44100;
-static const int    MAX_FRAMES      = SAMPLE_RATE * 300;
+static const int    MAX_FRAMES      = SAMPLE_RATE * 7200;  /* 2 hours — generous cap, audio is mmap'd to SD */
 static const int    NUM_STEMS       = 4;
 static const int    NUM_CUES        = 8;
 static const int    NUM_DECKS       = 2;
@@ -111,6 +114,7 @@ struct track_t {
     char file_name[128];
     float *audio_data;
     int    audio_frames;
+    size_t audio_mmap_len;  /* >0 = mmap'd with this byte length, 0 = malloc'd */
     float  duration_secs;
     int    muted;
     float  volume;
@@ -214,30 +218,95 @@ struct load_request_t {
     int   was_mod;
 };
 
-/* Deferred free list: audio buffers freed outside render_block */
+/* Deferred free list: audio buffers freed outside render_block.
+ * Supports both malloc'd and mmap'd buffers. */
+struct deferred_entry_t {
+    void  *ptr;
+    size_t mmap_len;  /* >0 = munmap, 0 = free */
+};
 static const int MAX_DEFERRED_FREES = 16;
-static void *s_deferred_frees[MAX_DEFERRED_FREES];
+static deferred_entry_t s_deferred_frees[MAX_DEFERRED_FREES];
 static std::atomic<int> s_deferred_free_count{0};
 
-static void deferred_free(void *p) {
+static void deferred_free(void *p, size_t mmap_len = 0) {
     if (!p) return;
     int idx = s_deferred_free_count.load(std::memory_order_relaxed);
     if (idx < MAX_DEFERRED_FREES) {
-        s_deferred_frees[idx] = p;
+        s_deferred_frees[idx] = {p, mmap_len};
         s_deferred_free_count.store(idx + 1, std::memory_order_release);
     } else {
-        /* Fallback: free immediately (shouldn't happen in practice) */
-        free(p);
+        if (mmap_len > 0) munmap(p, mmap_len);
+        else free(p);
     }
 }
 
 static void flush_deferred_frees() {
     int count = s_deferred_free_count.load(std::memory_order_acquire);
     for (int i = 0; i < count; i++) {
-        free(s_deferred_frees[i]);
-        s_deferred_frees[i] = nullptr;
+        if (s_deferred_frees[i].mmap_len > 0)
+            munmap(s_deferred_frees[i].ptr, s_deferred_frees[i].mmap_len);
+        else
+            free(s_deferred_frees[i].ptr);
+        s_deferred_frees[i] = {nullptr, 0};
     }
     s_deferred_free_count.store(0, std::memory_order_release);
+}
+
+/* Free or munmap a track's audio buffer */
+static void free_audio(track_t *trk) {
+    if (!trk->audio_data) return;
+    if (trk->audio_mmap_len > 0)
+        munmap(trk->audio_data, trk->audio_mmap_len);
+    else
+        free(trk->audio_data);
+    trk->audio_data = nullptr;
+    trk->audio_frames = 0;
+    trk->audio_mmap_len = 0;
+    trk->duration_secs = 0;
+}
+
+/* Convert a malloc'd audio buffer to mmap-backed SD storage.
+ * On failure, returns the original malloc'd buffer (graceful fallback). */
+static const char *MMAP_TMP_DIR = "/data/UserData/move-anything/tmp";
+static bool s_mmap_dir_created = false;
+
+static float *audio_to_mmap(float *buf, int frames, size_t *out_mmap_len) {
+    *out_mmap_len = 0;
+    if (!buf || frames <= 0) return buf;
+
+    /* Ensure temp directory exists */
+    if (!s_mmap_dir_created) {
+        mkdir("/data/UserData/move-anything", 0755);
+        mkdir(MMAP_TMP_DIR, 0755);
+        s_mmap_dir_created = true;
+    }
+
+    size_t data_size = (size_t)frames * 2 * sizeof(float);
+    char tmp_path[256];
+    snprintf(tmp_path, sizeof(tmp_path), "%s/audio_XXXXXX", MMAP_TMP_DIR);
+    int fd = mkstemp(tmp_path);
+    if (fd < 0) return buf;  /* fallback to malloc */
+    unlink(tmp_path);  /* auto-cleanup: mapping keeps inode alive */
+
+    /* Write decoded audio to temp file */
+    size_t written = 0;
+    while (written < data_size) {
+        ssize_t n = write(fd, (char *)buf + written, data_size - written);
+        if (n <= 0) { close(fd); return buf; }
+        written += (size_t)n;
+    }
+
+    /* mmap the file and free the malloc'd buffer */
+    float *mapped = (float *)mmap(NULL, data_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (mapped == MAP_FAILED) return buf;  /* fallback */
+
+    /* Advise kernel: sequential access pattern */
+    madvise(mapped, data_size, MADV_SEQUENTIAL);
+
+    free(buf);
+    *out_mmap_len = data_size;
+    return mapped;
 }
 
 static bool s_cue_dir_created = false;
@@ -384,7 +453,7 @@ static float *resample_to_target(float *buf, int src_frames, int src_rate, int *
     if (src_rate == SAMPLE_RATE || src_rate <= 0) { *out_frames = src_frames; return buf; }
     double ratio = (double)SAMPLE_RATE / (double)src_rate;
     int dst_frames = (int)(src_frames * ratio);
-    if (dst_frames <= 0 || dst_frames > MAX_FRAMES) { *out_frames = src_frames; return buf; }
+    if (dst_frames <= 0) { *out_frames = src_frames; return buf; }
     float *dst = (float *)calloc(dst_frames * 2, sizeof(float));
     if (!dst) { *out_frames = src_frames; return buf; }
     for (int i = 0; i < dst_frames; i++) {
@@ -415,7 +484,7 @@ static uint32_t read_u32(const uint8_t *p) {
 }
 
 static bool load_wav(track_t *trk, const char *path) {
-    if (trk->audio_data) { free(trk->audio_data); trk->audio_data = nullptr; trk->audio_frames = 0; trk->duration_secs = 0; }
+    free_audio(trk);
     FILE *fp = fopen(path, "rb");
     if (!fp) { host_log("[dj] cannot open %s", path); return false; }
     fseek(fp, 0, SEEK_END); long file_size = ftell(fp); fseek(fp, 0, SEEK_SET);
@@ -454,7 +523,10 @@ static bool load_wav(track_t *trk, const char *path) {
     int bytes_per_sample = bits_per_sample / 8;
     int block_align = bytes_per_sample * num_channels;
     int total_frames = (int)(data_size / block_align);
-    if (total_frames > MAX_FRAMES) total_frames = MAX_FRAMES;
+    /* Scale max by sample rate so resampling to SAMPLE_RATE yields up to MAX_FRAMES */
+    int max_src_frames = (sample_rate <= SAMPLE_RATE) ? MAX_FRAMES
+        : (int)((double)MAX_FRAMES * (double)sample_rate / (double)SAMPLE_RATE);
+    if (total_frames > max_src_frames) total_frames = max_src_frames;
     if (total_frames <= 0) { free(raw); return false; }
 
     float *buf = (float *)calloc(total_frames * 2, sizeof(float));
@@ -476,11 +548,13 @@ static bool load_wav(track_t *trk, const char *path) {
     free(raw);
     float duration_secs = (float)total_frames / (float)sample_rate;
     buf = resample_to_target(buf, total_frames, sample_rate, &total_frames);
-    trk->audio_data = buf; trk->audio_frames = total_frames;
+    size_t mmap_len = 0;
+    buf = audio_to_mmap(buf, total_frames, &mmap_len);
+    trk->audio_data = buf; trk->audio_frames = total_frames; trk->audio_mmap_len = mmap_len;
     trk->duration_secs = duration_secs;
     snprintf(trk->file_name, sizeof(trk->file_name), "%s", basename_ptr(path));
     snprintf(trk->file_path, sizeof(trk->file_path), "%s", path);
-    host_log("[dj] loaded wav: %s (%d frames, %.1fs, src %dHz)", trk->file_name, total_frames, trk->duration_secs, sample_rate);
+    host_log("[dj] loaded wav: %s (%d frames, %.1fs, src %dHz, mmap=%s)", trk->file_name, total_frames, trk->duration_secs, sample_rate, mmap_len ? "yes" : "no");
     return true;
 }
 
@@ -501,8 +575,7 @@ static bool load_mod(deck_t *dk, const char *path) {
     int stems = (mod_channels < NUM_STEMS) ? mod_channels : NUM_STEMS;
 
     for (int t = 0; t < NUM_STEMS; t++) {
-        if (dk->tracks[t].audio_data) { free(dk->tracks[t].audio_data); dk->tracks[t].audio_data = nullptr; }
-        dk->tracks[t].audio_frames = 0; dk->tracks[t].duration_secs = 0;
+        free_audio(&dk->tracks[t]);
         dk->tracks[t].file_name[0] = '\0'; dk->tracks[t].file_path[0] = '\0';
         dk->tracks[t].muted = 0; dk->tracks[t].volume = 1.0f;
     }
@@ -513,7 +586,8 @@ static bool load_mod(deck_t *dk, const char *path) {
         for (int i = 0; i < mod_channels; i++) xmp_channel_mute(ctx, i, (i == ch) ? 0 : 1);
         xmp_restart_module(ctx);
 
-        float *buf = (float *)calloc(MAX_FRAMES * 2, sizeof(float));
+        int buf_capacity = SAMPLE_RATE * 60; /* start 60s, grow as needed */
+        float *buf = (float *)calloc(buf_capacity * 2, sizeof(float));
         if (!buf) { xmp_end_player(ctx); continue; }
         int total_frames = 0;
         int16_t render_buf[4096];
@@ -522,6 +596,13 @@ static bool load_mod(deck_t *dk, const char *path) {
             if (ret < 0) break;
             int chunk_frames = (int)(sizeof(render_buf) / 4);
             int to_copy = std::min(chunk_frames, MAX_FRAMES - total_frames);
+            if (total_frames + to_copy > buf_capacity) {
+                int new_cap = std::max(buf_capacity * 2, total_frames + to_copy);
+                if (new_cap > MAX_FRAMES) new_cap = MAX_FRAMES;
+                float *newbuf = (float *)realloc(buf, new_cap * 2 * sizeof(float));
+                if (!newbuf) break;
+                buf = newbuf; buf_capacity = new_cap;
+            }
             for (int i = 0; i < to_copy; i++) {
                 buf[(total_frames+i)*2+0] = render_buf[i*2+0] / 32768.0f;
                 buf[(total_frames+i)*2+1] = render_buf[i*2+1] / 32768.0f;
@@ -532,8 +613,12 @@ static bool load_mod(deck_t *dk, const char *path) {
 
         if (total_frames > 0) {
             float *trimmed = (float *)realloc(buf, total_frames * 2 * sizeof(float));
-            dk->tracks[ch].audio_data = trimmed ? trimmed : buf;
+            buf = trimmed ? trimmed : buf;
+            size_t mmap_len = 0;
+            buf = audio_to_mmap(buf, total_frames, &mmap_len);
+            dk->tracks[ch].audio_data = buf;
             dk->tracks[ch].audio_frames = total_frames;
+            dk->tracks[ch].audio_mmap_len = mmap_len;
             dk->tracks[ch].duration_secs = (float)total_frames / (float)SAMPLE_RATE;
             snprintf(dk->tracks[ch].file_name, sizeof(dk->tracks[ch].file_name), "%s Ch%d", fname, ch+1);
             snprintf(dk->tracks[ch].file_path, sizeof(dk->tracks[ch].file_path), "%s", path);
@@ -557,13 +642,15 @@ static bool load_mod(deck_t *dk, const char *path) {
 #ifdef HAS_MP3
 
 static bool load_mp3(track_t *trk, const char *path) {
-    if (trk->audio_data) { free(trk->audio_data); trk->audio_data = nullptr; trk->audio_frames = 0; trk->duration_secs = 0; }
+    free_audio(trk);
     mp3dec_t mp3d; mp3dec_file_info_t info; memset(&info, 0, sizeof(info));
     if (mp3dec_load(&mp3d, path, &info, NULL, NULL) != 0) { host_log("[dj] mp3 decode failed: %s", path); return false; }
     if (info.samples == 0 || !info.buffer) { if (info.buffer) free(info.buffer); return false; }
     int channels = info.channels;
     int total_frames = (int)(info.samples / channels);
-    if (total_frames > MAX_FRAMES) total_frames = MAX_FRAMES;
+    int max_src_frames = (info.hz <= SAMPLE_RATE) ? MAX_FRAMES
+        : (int)((double)MAX_FRAMES * (double)info.hz / (double)SAMPLE_RATE);
+    if (total_frames > max_src_frames) total_frames = max_src_frames;
     float *buf = (float *)calloc(total_frames * 2, sizeof(float));
     if (!buf) { free(info.buffer); return false; }
     for (int i = 0; i < total_frames; i++) {
@@ -574,11 +661,13 @@ static bool load_mp3(track_t *trk, const char *path) {
     free(info.buffer);
     float duration_secs = (float)total_frames / (float)info.hz;
     buf = resample_to_target(buf, total_frames, info.hz, &total_frames);
-    trk->audio_data = buf; trk->audio_frames = total_frames;
+    size_t mmap_len = 0;
+    buf = audio_to_mmap(buf, total_frames, &mmap_len);
+    trk->audio_data = buf; trk->audio_frames = total_frames; trk->audio_mmap_len = mmap_len;
     trk->duration_secs = duration_secs;
     snprintf(trk->file_name, sizeof(trk->file_name), "%s", basename_ptr(path));
     snprintf(trk->file_path, sizeof(trk->file_path), "%s", path);
-    host_log("[dj] loaded mp3: %s (%d frames, %.1fs, src %dHz)", trk->file_name, total_frames, trk->duration_secs, info.hz);
+    host_log("[dj] loaded mp3: %s (%d frames, %.1fs, src %dHz, mmap=%s)", trk->file_name, total_frames, trk->duration_secs, info.hz, mmap_len ? "yes" : "no");
     return true;
 }
 
@@ -681,7 +770,7 @@ static void mp4_parse_atoms(const uint8_t *data, size_t len, size_t base_offset,
 }
 
 static bool load_m4a(track_t *trk, const char *path) {
-    if (trk->audio_data) { free(trk->audio_data); trk->audio_data=nullptr; trk->audio_frames=0; trk->duration_secs=0; }
+    free_audio(trk);
     FILE *fp = fopen(path, "rb"); if (!fp) return false;
     fseek(fp,0,SEEK_END); long file_size=ftell(fp); fseek(fp,0,SEEK_SET);
     if (file_size<32||file_size>500*1024*1024) { fclose(fp); return false; }
@@ -713,7 +802,8 @@ static bool load_m4a(track_t *trk, const char *path) {
     UCHAR *asc_buf=st.asc; UINT asc_size=(UINT)st.asc_len;
     if (aacDecoder_ConfigRaw(aac,&asc_buf,&asc_size)!=AAC_DEC_OK) { aacDecoder_Close(aac); free(sample_offsets); if(st.sample_sizes)free(st.sample_sizes); if(st.chunk_offsets)free(st.chunk_offsets); if(st.stsc_entries)free(st.stsc_entries); free(raw); return false; }
 
-    float *buf=(float*)calloc(MAX_FRAMES*2,sizeof(float));
+    int buf_capacity=SAMPLE_RATE*60; /* start with 60s, grow as needed */
+    float *buf=(float*)calloc(buf_capacity*2,sizeof(float));
     if (!buf) { aacDecoder_Close(aac); free(sample_offsets); if(st.sample_sizes)free(st.sample_sizes); if(st.chunk_offsets)free(st.chunk_offsets); if(st.stsc_entries)free(st.stsc_entries); free(raw); return false; }
     int total_frames=0, out_sample_rate=SAMPLE_RATE, out_channels=2;
     INT_PCM pcm_buf[2048*2];
@@ -728,6 +818,14 @@ static bool load_m4a(track_t *trk, const char *path) {
         if (!info||info->numChannels<1) continue;
         if (i==0) { out_sample_rate=info->sampleRate; out_channels=info->numChannels; }
         int frame_samples=info->frameSize, to_copy=std::min(frame_samples,MAX_FRAMES-total_frames);
+        /* Grow buffer if needed */
+        if (total_frames+to_copy>buf_capacity) {
+            int new_cap=std::max(buf_capacity*2, total_frames+to_copy);
+            if (new_cap>MAX_FRAMES) new_cap=MAX_FRAMES;
+            float *newbuf=(float*)realloc(buf,new_cap*2*sizeof(float));
+            if (!newbuf) break; /* out of memory, use what we have */
+            buf=newbuf; buf_capacity=new_cap;
+        }
         for (int j=0;j<to_copy;j++) {
             float L=pcm_buf[j*out_channels]/32768.0f;
             float R=(out_channels>1)?pcm_buf[j*out_channels+1]/32768.0f:L;
@@ -744,11 +842,13 @@ static bool load_m4a(track_t *trk, const char *path) {
     buf=trimmed?trimmed:buf;
     float duration_secs=(float)total_frames/(float)out_sample_rate;
     buf=resample_to_target(buf,total_frames,out_sample_rate,&total_frames);
-    trk->audio_data=buf; trk->audio_frames=total_frames;
+    size_t mmap_len=0;
+    buf=audio_to_mmap(buf,total_frames,&mmap_len);
+    trk->audio_data=buf; trk->audio_frames=total_frames; trk->audio_mmap_len=mmap_len;
     trk->duration_secs=duration_secs;
     snprintf(trk->file_name,sizeof(trk->file_name),"%s",basename_ptr(path));
     snprintf(trk->file_path,sizeof(trk->file_path),"%s",path);
-    host_log("[dj] loaded m4a: %s (%d frames, %.1fs, src %dHz)", trk->file_name, total_frames, trk->duration_secs, out_sample_rate);
+    host_log("[dj] loaded m4a: %s (%d frames, %.1fs, src %dHz, mmap=%s)", trk->file_name, total_frames, trk->duration_secs, out_sample_rate, mmap_len?"yes":"no");
     return true;
 }
 
@@ -761,7 +861,7 @@ static bool load_m4a(track_t *trk, const char *path) {
 #ifdef HAS_FLAC
 
 static bool load_flac(track_t *trk, const char *path) {
-    if (trk->audio_data) { free(trk->audio_data); trk->audio_data=nullptr; trk->audio_frames=0; trk->duration_secs=0; }
+    free_audio(trk);
     FILE *fp=fopen(path,"rb"); if(!fp) return false;
     fseek(fp,0,SEEK_END); long file_size=ftell(fp); fseek(fp,0,SEEK_SET);
     if (file_size<8||file_size>500*1024*1024) { fclose(fp); return false; }
@@ -773,7 +873,10 @@ static bool load_flac(track_t *trk, const char *path) {
     drflac_int16 *samples=drflac_open_memory_and_read_pcm_frames_s16(raw,(size_t)file_size,&channels,&sample_rate,&total_pcm,NULL);
     free(raw);
     if (!samples||total_pcm==0) { if(samples) drflac_free(samples,NULL); return false; }
-    int total_frames=(int)total_pcm; if(total_frames>MAX_FRAMES) total_frames=MAX_FRAMES;
+    int total_frames=(int)total_pcm;
+    int max_src_frames=(sample_rate<=SAMPLE_RATE)?MAX_FRAMES
+        :(int)((double)MAX_FRAMES*(double)sample_rate/(double)SAMPLE_RATE);
+    if(total_frames>max_src_frames) total_frames=max_src_frames;
     float *buf=(float*)calloc(total_frames*2,sizeof(float));
     if (!buf) { drflac_free(samples,NULL); return false; }
     for (int i=0;i<total_frames;i++) {
@@ -784,11 +887,13 @@ static bool load_flac(track_t *trk, const char *path) {
     drflac_free(samples,NULL);
     float duration_secs=(float)total_frames/(float)sample_rate;
     buf=resample_to_target(buf,total_frames,sample_rate,&total_frames);
-    trk->audio_data=buf; trk->audio_frames=total_frames;
+    size_t mmap_len=0;
+    buf=audio_to_mmap(buf,total_frames,&mmap_len);
+    trk->audio_data=buf; trk->audio_frames=total_frames; trk->audio_mmap_len=mmap_len;
     trk->duration_secs=duration_secs;
     snprintf(trk->file_name,sizeof(trk->file_name),"%s",basename_ptr(path));
     snprintf(trk->file_path,sizeof(trk->file_path),"%s",path);
-    host_log("[dj] loaded flac: %s (%d frames, %.1fs, src %dHz)", trk->file_name, total_frames, trk->duration_secs, sample_rate);
+    host_log("[dj] loaded flac: %s (%d frames, %.1fs, src %dHz, mmap=%s)", trk->file_name, total_frames, trk->duration_secs, sample_rate, mmap_len?"yes":"no");
     return true;
 }
 
@@ -1360,6 +1465,7 @@ static void *bg_load_thread(void *arg) {
         for (int t = 0; t < NUM_STEMS; t++) {
             dk->new_tracks[t].audio_data = nullptr;
             dk->new_tracks[t].audio_frames = 0;
+            dk->new_tracks[t].audio_mmap_len = 0;
             dk->new_tracks[t].duration_secs = 0;
             dk->new_tracks[t].volume = req->stem_volumes[t];
             dk->new_tracks[t].muted = req->stem_muted[t];
@@ -1417,7 +1523,7 @@ static void *bg_load_thread(void *arg) {
         dk->load_state.store(2, std::memory_order_release); /* ready for swap */
     } else {
         for (int t = 0; t < NUM_STEMS; t++)
-            if (dk->new_tracks[t].audio_data) { free(dk->new_tracks[t].audio_data); dk->new_tracks[t].audio_data = nullptr; }
+            free_audio(&dk->new_tracks[t]);
         dk->load_state.store(0, std::memory_order_release);
     }
 
@@ -1437,11 +1543,12 @@ static void check_load_complete(deck_t *dk) {
     dk->playing = 0;
     dk->out_count = 0; dk->out_head = 0;
 
-    /* Defer-free old audio data (never free on render thread) */
+    /* Defer-free old audio data (never free/munmap on render thread) */
     for (int t = 0; t < NUM_STEMS; t++) {
         if (dk->tracks[t].audio_data) {
-            deferred_free(dk->tracks[t].audio_data);
+            deferred_free(dk->tracks[t].audio_data, dk->tracks[t].audio_mmap_len);
             dk->tracks[t].audio_data = nullptr;
+            dk->tracks[t].audio_mmap_len = 0;
         }
     }
 
@@ -1645,7 +1752,7 @@ static void destroy_deck(deck_t *dk) {
     if (dk->grain_input) free(dk->grain_input);
     if (dk->out_buf) free(dk->out_buf);
     for (int t = 0; t < NUM_STEMS; t++)
-        if (dk->tracks[t].audio_data) free(dk->tracks[t].audio_data);
+        free_audio(&dk->tracks[t]);
 }
 
 /* ------------------------------------------------------------------ */
