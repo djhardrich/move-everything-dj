@@ -1,6 +1,6 @@
-# DJ Deck Module for Move Anything
+# DJ Deck Module for Move Everything
 
-Turns an Ableton Move into a standalone CDJ/turntable-style dual-deck DJ player using the [Move Anything](https://github.com/charlesvestal/move-anything) framework.
+Turns an Ableton Move into a standalone CDJ/turntable-style dual-deck DJ player using the [Move Everything](https://github.com/charlesvestal/move-everything) framework.
 
 Designed for use with a physical DJ mixer between multiple Moves. Each Move runs two independent decks with timestretch, pitchshift, cue points, loops, stutter effects, slip mode, and BPM sync.
 
@@ -11,7 +11,7 @@ Designed for use with a physical DJ mixer between multiple Moves. Each Move runs
 
 ## Installation
 
-Install [Move Anything](https://github.com/charlesvestal/move-everything-installer) , go to Move Anything settings (shift+touch vol knob+step 2), scroll to Updates, Module Store, Tools, select and click DJ Deck with the data wheel, scroll the data wheel down to Install, and click the data wheel.
+Install [Move Everything](https://github.com/charlesvestal/move-everything-installer) , go to Move Anything settings (shift+touch vol knob+step 2), scroll to Updates, Module Store, Tools, select and click DJ Deck with the data wheel, scroll the data wheel down to Install, and click the data wheel.
 
 ## Building/Development
 
